@@ -1,96 +1,82 @@
-import functools
-import json
-import time
+import asyncio
 from fake_useragent import UserAgent
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 from random import randint
-from multiprocessing import Pool
+
+from playwright.async_api import async_playwright
+from playwright.async_api._generated import Playwright
 
 
 class YandexFormFiller:
-    def __init__(self, cookies_file_path, captcha_cookies_file_path, form_url):
+    def __init__(
+        self,
+        playwright: Playwright,
+        cookies_file_path,
+        captcha_cookies_file_path,
+        form_url,
+    ):
         self.cookies_file_path = cookies_file_path
         self.captcha_cookies_file_path = captcha_cookies_file_path
         self.form_url = form_url
-        self.driver = self._initialize_driver()
+        self.playwright = playwright
 
-    def _initialize_driver(self):
+    async def _initialize_driver(self):
         ua = UserAgent()
-        options = Options()
-        # options.add_argument("--headless")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument(f"user-agent={ua.chrome}")
-        options.add_extension("block.crx")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()), options=options
+        browser = await self.playwright.chromium.launch(headless=False)
+
+        context = await browser.new_context(
+            storage_state="cookies.json",
+            user_agent=ua.chrome,
         )
+
+        driver = await context.new_page()
+
         return driver
 
-    def load_cookies(self, path):
-        with open(path, "r") as cookies_file:
-            cookies = json.load(cookies_file)
-            for cookie in cookies:
-                self.driver.add_cookie(cookie)
+    async def handle_captcha(self):
+        while "https://forms.yandex.ru/showcaptcha" in self.driver.url:
+            await asyncio.sleep(5)
 
-    def save_cookies(self, path):
-        cookies = self.driver.get_cookies()
-        with open(path, "w") as file:
-            json.dump(cookies, file)
+    async def fill_form(self):
+        self.driver = await self._initialize_driver()
+        await self.driver.goto(self.form_url)
+        await self.handle_captcha()
+        await asyncio.sleep(2)
 
-    def handle_captcha(self):
-        while "https://forms.yandex.ru/showcaptcha" in self.driver.current_url:
-            self.load_cookies(self.captcha_cookies_file_path)
-            time.sleep(5)
-            self.save_cookies(self.captcha_cookies_file_path)
-
-    def fill_form(self):
-        self.driver.get(self.form_url)
-        self.load_cookies(self.cookies_file_path)
-        self.handle_captcha()
-        time.sleep(2)
-
-        checkbox_elements = self.driver.find_elements(
-            by=By.CLASS_NAME,
-            value="CheckboxQuestion-Control",
+        checkbox_elements = self.driver.locator(
+            ".CheckboxQuestion-Control",
         )
+        count = await checkbox_elements.count()
 
-        for checkbox in checkbox_elements:
-            options = checkbox.find_elements(by=By.TAG_NAME, value="label")
-            selected_option = randint(0, len(options) - 1)
-            options[selected_option].click()
-            time.sleep(randint(1, 2))
-            print(options[selected_option].text)
+        for i in range(count):
+            inner_elements = checkbox_elements.nth(i).locator("label")
+            inner_elements_count = await inner_elements.count()
 
-        self.driver.find_element(by=By.CSS_SELECTOR, value="button.g-button").click()
+            clicked_option = randint(0, inner_elements_count - 1)
+            await inner_elements.nth(clicked_option).click()
+            text = await inner_elements.nth(clicked_option).text_content()
+            await asyncio.sleep(randint(1, 2))
+
+            print(text)
+
+        await self.driver.locator("button.g-button").click()
+        await asyncio.sleep(20)
 
     def close(self):
         self.save_cookies(self.cookies_file_path)
         self.driver.close()
 
 
-# Usage example
-if __name__ == "__main__":
-    with Pool() as p:
+async def main():
+    async with async_playwright() as p:
         form_filler = YandexFormFiller(
+            p,
             "cookies.json",
             "captcha_cookies.json",
-            "https://forms.yandex.ru/u/{id}/",
+            "https://forms.yandex.ru/u/5eaa7a8b6a56c71326740436/",
         )
-        form_filler.fill_form()
-        form_filler.close()
+        await form_filler.fill_form()
 
-        processes = [
-            p.apply_async(functools.partial(form_filler.fill_form)) for _ in range(6)
-        ]
-        print(f"Process: {len(processes)}")
 
-        for process in processes:
-            process.get()
+# Usage example
+if __name__ == "__main__":
+    asyncio.run(main())
